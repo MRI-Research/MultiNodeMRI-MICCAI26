@@ -5,6 +5,8 @@ the following paper:
 
 > Zhang et al. Large-Scale Distributed GPU-Accelerated Respiratory Motion-Resolved Reconstruction of 3D non-Cartesian mGRE MRI. <em>International Conference on Medical Image Computing and Computer Assisted Interventions (MICCAI) 2026</em>.
 
+Contact: Chao Zhang (<Chao.Zhang.1@stonybrook.edu>)
+
 ## Dataset
 
 **3D Multi-Echo Cones Liver MRI:** [![DOI: 10.5281/zenodo.21414404](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21414404-blue.svg)](https://doi.org/10.5281/zenodo.21414404)
@@ -18,11 +20,11 @@ and reconstruction outputs in separate directories.
 The repository includes three topology-aware PDHG reconstruction methods:
 
 - **TVM** applies total-variation regularization along the respiratory-motion
-  dimension.
+  dimension (https://onlinelibrary.wiley.com/doi/abs/10.1002/mrm.29779).
 - **TVME** couples motion and echo dimensions with total-variation
-  regularization.
+  regularization (https://papers.miccai.org/miccai-2025/paper/3082_paper.pdf).
 - **TVMW** combines motion regularization with a db1 echo wavelet and a db6
-  spatial wavelet.
+  spatial wavelet (https://doi.org/10.1016/j.media.2025.103532).
 
 The multi-node implementation uses a two-dimensional motion/echo node grid.
 Within each node, coils are distributed across the local GPUs. NCCL handles
