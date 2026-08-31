@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toporecon"
+version = "0.1.0.dev0"
+description = "Topology-aware distributed reconstruction for motion-resolved MRI."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26,<3",
+    "scipy>=1.11",
+    "sigpy>=0.1.27",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+distributed = [
+    "mpi4py>=4",
+]
+wavelet = [
+    "torch>=2",
+    "ptwt",
+]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+]
+
+[project.scripts]
+toporecon = "toporecon.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gpu: requires a CUDA-capable GPU",
+    "mpi: requires an MPI launch environment",
+    "regression: compares against frozen numerical reference results",
+]

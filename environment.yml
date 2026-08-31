@@ -1,0 +1,19 @@
+name: toporecon-miccai
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.12
+  - numpy=1.26
+  - scipy
+  - cupy=13.2
+  - mpi4py=4
+  - mpich
+  - pytorch
+  - tqdm
+  - pip
+  - pip:
+      - sigpy==0.1.27
+      - ptwt
+      - pytest
+      - pytest-cov
