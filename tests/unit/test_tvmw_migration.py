@@ -40,18 +40,96 @@ class TvmwMigrationTests(unittest.TestCase):
         self.assertIn("self.nufft.forward(", source)
         self.assertIn("self.nufft.adjoint(", source)
 
-    def test_stopping_tolerance_keeps_host_scalar_global_max(self) -> None:
+    def test_stopping_tolerance_uses_topology_invariant_global_l2(self) -> None:
         source = TVMW_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn(
+            "difference = mrimg_od - mrimg",
+            source,
+        )
+        self.assertIn(
+            "numerator_local = self.xp.vdot(\n"
+            "                            difference.ravel(),",
+            source,
+        )
+        self.assertIn(
+            "denominator_local = self.xp.vdot(\n"
+            "                            mrimg_od.ravel(),",
+            source,
+        )
+        self.assertIn(
+            "buf = self.xp.empty((2,), dtype=self.xp.float32)",
+            source,
+        )
+        self.assertIn(
+            "self.world_comm is not None\n"
+            "                            and self.group_comm is not None",
+            source,
+        )
+        self.assertIn("self.group_comm.Get_rank() != 0", source)
+        self.assertIn("buf[0] = self.xp.float32(0.0)", source)
+        self.assertIn("buf[1] = self.xp.float32(0.0)", source)
+        self.assertIn("buf_host = cp.asnumpy(buf)", source)
+        self.assertIn("buf_host = np.asarray(buf)", source)
+        self.assertIn(
+            "self.world_comm.Allreduce(\n"
+            "                                MPI.IN_PLACE,\n"
+            "                                buf_host,\n"
+            "                                op=MPI.SUM,",
+            source,
+        )
+        self.assertIn(
+            "numerator_norm / max(denominator_norm, 1e-12)",
+            source,
+        )
+        self.assertIn('global_tol = float("inf")', source)
+        self.assertNotIn(
             "local_ratio = num / self.xp.maximum(den, 1e-12)",
             source,
         )
-        self.assertIn("local_tol = float(cp.asnumpy(local_ratio))", source)
-        self.assertIn(
+        self.assertNotIn(
             "self.world_comm.allreduce(local_tol, op=MPI.MAX)",
             source,
         )
+
+        allreduce_position = source.index("self.world_comm.Allreduce(")
+        stop_position = source.index(
+            "if global_tol < self.tol:",
+            allreduce_position,
+        )
+        self.assertLess(allreduce_position, stop_position)
+
+    def test_global_l2_tolerance_is_independent_of_sharding(self) -> None:
+        numerator_squared = [8.10e-5, 1.44e-5]
+        denominator_squared = [100.0, 10.0]
+
+        full_tolerance = (
+            sum(numerator_squared) ** 0.5
+            / max(sum(denominator_squared) ** 0.5, 1e-12)
+        )
+        local_tolerances = [
+            numerator ** 0.5 / max(denominator ** 0.5, 1e-12)
+            for numerator, denominator in zip(
+                numerator_squared,
+                denominator_squared,
+            )
+        ]
+        replicated_node_sums = [
+            sum([value, 0.0, 0.0, 0.0])
+            for value in numerator_squared
+        ]
+        replicated_node_denominators = [
+            sum([value, 0.0, 0.0, 0.0])
+            for value in denominator_squared
+        ]
+        sharded_tolerance = (
+            sum(replicated_node_sums) ** 0.5
+            / max(sum(replicated_node_denominators) ** 0.5, 1e-12)
+        )
+
+        self.assertAlmostEqual(full_tolerance, sharded_tolerance)
+        self.assertLess(full_tolerance, 1e-3)
+        self.assertGreater(max(local_tolerances), 1e-3)
 
     def test_tvmw_keeps_legacy_trajectory_and_dcf_semantics(self) -> None:
         source = TVMW_SOURCE.read_text(encoding="utf-8")

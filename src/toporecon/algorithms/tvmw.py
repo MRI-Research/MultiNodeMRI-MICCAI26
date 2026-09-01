@@ -723,21 +723,55 @@ class TvmwReconstructor:
 
                         mrimg, primal_u_old, primal_u_tmp, dual_p_m, dual_p_w1, dual_p_w2, dual_q = \
                         self.pdhg(mrimg, primal_u_old, primal_u_tmp, dual_p_m, dual_p_w1, dual_p_w2, dual_q, it)
-                        # local tol
-                        num = self.xp.linalg.norm(self.xp.abs(mrimg_od - mrimg))
-                        den = self.xp.linalg.norm(self.xp.abs(mrimg_od))
-                        local_ratio = num / self.xp.maximum(den, 1e-12)
+                        difference = mrimg_od - mrimg
+                        numerator_local = self.xp.vdot(
+                            difference.ravel(),
+                            difference.ravel(),
+                        ).real
+                        denominator_local = self.xp.vdot(
+                            mrimg_od.ravel(),
+                            mrimg_od.ravel(),
+                        ).real
+
+                        buf = self.xp.empty((2,), dtype=self.xp.float32)
+                        buf[0] = numerator_local.astype(buf.dtype, copy=False)
+                        buf[1] = denominator_local.astype(buf.dtype, copy=False)
+
+                        if (
+                            self.world_comm is not None
+                            and self.group_comm is not None
+                            and self.group_comm.Get_rank() != 0
+                        ):
+                            buf[0] = self.xp.float32(0.0)
+                            buf[1] = self.xp.float32(0.0)
+
+                        # Stage through host memory so every rank observes the
+                        # same completed reduction before deciding to stop.
                         if CUPY_AVAILABLE and self.xp is cp:
-                            local_tol = float(cp.asnumpy(local_ratio))
+                            buf_host = cp.asnumpy(buf)
                         else:
-                            local_tol = float(local_ratio)
-                        # global tol = max over all ranks
+                            buf_host = np.asarray(buf)
+
                         if self.world_comm is not None:
+                            self.world_comm.Allreduce(
+                                MPI.IN_PLACE,
+                                buf_host,
+                                op=MPI.SUM,
+                            )
+
+                        numerator = float(buf_host[0])
+                        denominator = float(buf_host[1])
+                        if (
+                            np.isfinite(numerator)
+                            and np.isfinite(denominator)
+                        ):
+                            numerator_norm = np.sqrt(max(numerator, 0.0))
+                            denominator_norm = np.sqrt(max(denominator, 0.0))
                             global_tol = float(
-                                self.world_comm.allreduce(local_tol, op=MPI.MAX)
+                                numerator_norm / max(denominator_norm, 1e-12)
                             )
                         else:
-                            global_tol = local_tol
+                            global_tol = float("inf")
                         if self.show_pbar:
                             pbar.set_postfix(tol=global_tol)
                         if global_tol < self.tol:
