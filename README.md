@@ -190,15 +190,46 @@ The command places each shard according to the motion and echo ranges in its
 filename. The same command works for single- and multi-node output, and the
 assembled CFL layout is `[motion, 1, 1, echo, 1, 1, z, y, x]`.
 
-Complete single-node command examples are provided in `examples/run_tvm.sh`,
-`run_tvme.sh`, and `run_tvmw.sh`. `examples/run_postprocessing.sh` provides the
-same post-processing command, while the `deltaai_*.slurm` files are multi-node
-DeltaAI reference templates.
+## Examples and tests
 
-For example, the wrapper accepts the same post-processing options:
+Run the example scripts from the repository root:
+
+- `examples/run_tvm.sh`, `run_tvme.sh`, and `run_tvmw.sh` are complete
+  single-node reconstruction references. Pass the raw, prepared, and output
+  directories; parameters can be overridden with environment variables.
+
+  ```bash
+  examples/run_tvme.sh RAW_DATA_DIR PREPARED_DIR OUTPUT_DIR
+  ```
+
+- `examples/run_postprocessing.sh` assembles the reconstruction shards. It
+  accepts the same options as `toporecon stitch`.
+
+  ```bash
+  examples/run_postprocessing.sh OUTPUT_DIR \
+    --input-prefix custom_prefix \
+    --output-name final_image
+  ```
+
+- `examples/deltaai_prepare.slurm` is the one-GPU preprocessing template for
+  DeltaAI. The three `deltaai_tvm*.slurm` files are four-node, 16-GPU
+  reconstruction references. Set the input/output paths and a suitable
+  walltime when submitting them.
+
+  ```bash
+  sbatch --time=HH:MM:SS \
+    --export=ALL,INPUT_DIR=/path/to/raw,PREPARED_DIR=/path/to/prepared,OUT_DIR=/path/to/output \
+    examples/deltaai_tvme.slurm
+  ```
+
+The tests have four focused roles: `test_cfl.py` checks CFL/HDR I/O,
+`test_dataset.py` checks the input data contract, `test_trajectory.py` checks
+trajectory and FOV handling, and `test_postprocessing.py` checks shard
+assembly. Run them with:
 
 ```bash
-examples/run_postprocessing.sh "$OUTPUT_DIR" \
-  --input-prefix custom_prefix \
-  --output-name final_image
+python -m unittest discover -s tests/unit -v
 ```
+
+These are fast CPU checks; full GPU/MPI reconstruction should be verified on
+the target cluster.
