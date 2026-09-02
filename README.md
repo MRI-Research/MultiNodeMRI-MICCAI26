@@ -13,7 +13,15 @@ Contact: Chao Zhang (<Chao.Zhang.1@stonybrook.edu>)
 
 Download and extract the dataset before running the preparation and
 reconstruction commands below. Keep the downloaded raw data, prepared data,
-and reconstruction outputs in separate directories.
+and reconstruction outputs in separate directories. The raw data directory
+must contain:
+
+```text
+ksp.hdr        ksp.cfl
+ktraj.hdr      ktraj.cfl
+dens.hdr       dens.cfl
+imageDim.txt   voxelSize.txt   tr.txt
+```
 
 ## Reconstruction methods
 
@@ -42,24 +50,21 @@ conda activate toporecon-miccai
 python -m pip install -e .
 ```
 
-CUDA and CuPy must be compatible with the GPUs and drivers on the target
-system. TVMW additionally requires PyTorch and PTWT; both are included in
-`environment.yml`.
+The main dependencies are Python 3.12, NumPy 1.26, SciPy, CuPy 13.2,
+SigPy 0.1.27, MPI/`mpi4py`, and tqdm. TVMW additionally requires PyTorch and
+PTWT. CUDA, CuPy, MPI, and the GPU driver must be compatible with the target
+system; multi-node runs require a CUDA-aware MPI installation.
 
-## Data preparation
+## Data preprocessing
 
-Set paths for the extracted dataset and a persistent preparation directory:
+Set paths for the extracted dataset and a persistent preparation directory,
+then run respiratory self-gating and JSENSE once:
 
 ```bash
 export RAW_DATA_DIR=/path/to/raw-data
 export PREPARED_DIR=/path/to/prepared-data
-```
 
-Validate the raw data and run RESP and JSENSE once:
-
-```bash
 toporecon inspect "$RAW_DATA_DIR"
-
 toporecon prepare "$RAW_DATA_DIR" \
   --work-dir "$PREPARED_DIR" \
   --device 0 \
@@ -67,139 +72,90 @@ toporecon prepare "$RAW_DATA_DIR" \
   --show-progress
 ```
 
-The preparation directory will contain:
+This writes `resp.hdr/.cfl`, `mps.hdr/.cfl`, and `manifest.json` to
+`PREPARED_DIR`.
 
-```text
-mps.hdr
-mps.cfl
-resp.hdr
-resp.cfl
-manifest.json
-```
+GPU JSENSE can show small run-to-run floating-point differences because its
+gridding uses atomic additions. For reproducible comparisons, reconstruct the
+sensitivity maps once and keep reusing the same prepared directory. Run
+JSENSE again only when the raw data, FOV, or another preprocessing setting
+changes. The preprocessing and reconstruction values of
+`--fov-scale Z Y X` must match.
 
-RESP and JSENSE can also be run separately:
+## Reconstruction
 
-```bash
-toporecon resp "$RAW_DATA_DIR" --work-dir "$PREPARED_DIR"
-
-toporecon jsense "$RAW_DATA_DIR" \
-  --work-dir "$PREPARED_DIR" \
-  --device 0 \
-  --fov-scale 1.0 1.0 1.0 \
-  --show-progress
-```
-
-Prepared files must come from the same raw dataset used for reconstruction.
-The `--fov-scale Z Y X` values used by JSENSE must exactly match those used by
-TVM, TVME, or TVMW.
-
-### JSENSE reproducibility
-
-GPU JSENSE gridding performs a dense set of `atomicAdd` operations. Because
-the parallel accumulation order is not deterministic, repeated gridding runs
-can differ by approximately `1e-6`; after multiple JSENSE iterations, these
-differences may grow to approximately `1e-3` in the sensitivity maps.
-
-For reproducible comparisons, run JSENSE once and reuse the same
-`mps.hdr/.cfl` for every reconstruction. CPU JSENSE avoids the GPU
-`atomicAdd` path but is very slow:
+Single- and multi-node reconstruction use the same command. The example below
+runs TVME; replace `tvme` and the lambda options to use TVM or TVMW. Use one
+MPI rank per GPU and replace `mpiexec` with the site's corresponding launcher
+when needed.
 
 ```bash
-toporecon jsense "$RAW_DATA_DIR" \
-  --work-dir "$PREPARED_DIR" \
-  --device -1 \
-  --fov-scale 1.0 1.0 1.0
-```
+export OUTPUT_DIR=/path/to/output
+export MPI_RANKS=1
 
-## Single-process reconstruction
-
-The wrappers in `examples/` provide short single-process commands:
-
-```bash
-examples/run_tvm.sh  "$RAW_DATA_DIR" "$PREPARED_DIR" /path/to/output/tvm
-examples/run_tvme.sh "$RAW_DATA_DIR" "$PREPARED_DIR" /path/to/output/tvme
-examples/run_tvmw.sh "$RAW_DATA_DIR" "$PREPARED_DIR" /path/to/output/tvmw
-```
-
-The equivalent TVME command is:
-
-```bash
-mpiexec -n 1 toporecon reconstruct --algorithm tvme -- \
+mpiexec -n "$MPI_RANKS" toporecon reconstruct --algorithm tvme -- \
+  --multi-gpu \
   --prepared-dir "$PREPARED_DIR" \
-  --output-dir /path/to/output/tvme \
+  --output-dir "$OUTPUT_DIR" \
   --nufft-backend sigpy \
+  --readout-fraction 0.98 \
   --num-bins 6 \
   --motion-groups 1 \
   --echo-groups 1 \
   --fov-scale 1.0 1.0 1.0 \
-  "$RAW_DATA_DIR" reconstruction
+  --lambda-motion 1e-4 \
+  --lambda-echo 1e-5 \
+  --l2-coupling \
+  --max-iter 300 \
+  --show-progress \
+  "$RAW_DATA_DIR" imout
 ```
 
-Replace `tvme` with `tvm` or `tvmw` as needed. Arguments after `--` are passed
-to the selected algorithm.
+`motion-groups * echo-groups` must equal the number of physical compute
+nodes, not the number of MPI ranks. A single-node run uses a `1 x 1` grid; a
+four-node run can use `2 x 2`. Within each node, MPI ranks divide the receiver
+coils across the local GPUs.
 
-## Multi-node reconstruction on DeltaAI
+### Main parameters
 
-The supplied Slurm templates use four nodes, sixteen MPI ranks, one rank per
-GPU, and a `2 x 2` motion/echo node grid:
+| Parameter | Meaning |
+| --- | --- |
+| `RAW_DATA_DIR` | Raw k-space, trajectory, density, and scan metadata directory. |
+| `--prepared-dir` | Directory containing the reusable `mps` and `resp` files. |
+| `--output-dir` | Directory for reconstruction shards and `run_manifest.json`. |
+| `imout` | Output filename stem. |
+| `--fov-scale Z Y X` | Per-axis FOV scale; each value must be at least 1 and must match JSENSE. |
+| `--num-bins` | Number of respiratory motion phases; default `6`. |
+| `--motion-groups` | Number of node-grid rows used to divide motion bins. |
+| `--echo-groups` | Number of node-grid columns used to divide echoes. |
+| Lambda options | Regularization strengths; larger values apply stronger regularization. |
+| `tol` | Relative L2-change stopping threshold. The current reconstruction entry points use the fixed value `1e-3`. |
+| `--max-iter` | Maximum number of PDHG iterations; default `300`. |
+| `--readout-fraction` | Fraction of readout samples used for reconstruction; default `0.98`. |
+| `--multi-gpu` | Assign each node-local MPI rank to the GPU with the same local rank. |
+| `--l2-coupling` | Couple motion regularization across echoes. |
 
-- `examples/deltaai_tvm.slurm`
-- `examples/deltaai_tvme.slurm`
-- `examples/deltaai_tvmw.slurm`
+The algorithm-specific lambda options and defaults are:
 
-The templates default to ten iterations and a three-minute walltime for smoke
-testing. A full reconstruction should explicitly set a longer walltime and the
-intended iteration count.
+| Algorithm | Lambda options |
+| --- | --- |
+| TVM | `--lambda-motion 1e-6` |
+| TVME | `--lambda-motion 1e-4`, `--lambda-echo 1e-5` |
+| TVMW | `--lambda-motion 1e-6`, `--lambda-echo-wavelet 1e-6`, `--lambda-spatial-wavelet 1e-6` |
 
-From the repository root, define the shared paths and allocation:
+Each physical node writes one shard named
+`imout_e<ECHO_START>-<ECHO_END>_m<MOTION_START>-<MOTION_END>.hdr/.cfl`;
+the end indices are inclusive.
+
+## Post-processing
+
+After the MPI job finishes, assemble all grid shards into one image:
 
 ```bash
-export TOPORECON_DIR="$PWD"
-export PY="$(command -v python)"
-export INPUT_DIR="$RAW_DATA_DIR"
-export PREPARED_DIR=/path/to/prepared-data
-export RUN_ROOT=/path/to/reconstruction-runs
-export ACCOUNT=your_allocation
-export WALLTIME=HH:MM:SS
-
-mkdir -p "$RUN_ROOT"
+python scripts/stitch_shards.py "$OUTPUT_DIR"
 ```
 
-Submit full TVM, TVME, and TVMW reconstructions as separate jobs:
-
-```bash
-sbatch -A "$ACCOUNT" -t "$WALLTIME" \
-  --export=ALL,OUT_DIR="$RUN_ROOT/tvm",MAX_ITER=300 \
-  examples/deltaai_tvm.slurm
-
-sbatch -A "$ACCOUNT" -t "$WALLTIME" \
-  --export=ALL,OUT_DIR="$RUN_ROOT/tvme",MAX_ITER=300 \
-  examples/deltaai_tvme.slurm
-
-sbatch -A "$ACCOUNT" -t "$WALLTIME" \
-  --export=ALL,OUT_DIR="$RUN_ROOT/tvmw",MAX_ITER=300 \
-  examples/deltaai_tvmw.slurm
-```
-
-Choose `WALLTIME` from the measured smoke-test runtime for the dataset and
-allocation. Keep `MOTION_GROUPS * ECHO_GROUPS` equal to the number of MPI
-nodes. The templates expose regularization and runtime settings through
-environment variables:
-
-- **TVM:** `LAMBDA_MOTION`, `ACCELERATION`, and `REDUCE_PER_BIN`.
-- **TVME:** `LAMBDA_MOTION`, `LAMBDA_ECHO`, and `ACCELERATION`.
-- **TVMW:** `LAMBDA_MOTION`, `LAMBDA_ECHO_WAVELET`, and
-  `LAMBDA_SPATIAL_WAVELET`.
-- **Common:** `NUM_BINS`, `READOUT_FRACTION`, `MAX_ITER`, `FOV_SCALE_Z`,
-  `FOV_SCALE_Y`, `FOV_SCALE_X`, `CROP_TO_ORIGINAL`, and `USE_FP16_COMM`.
-
-Reconstruction outputs, `run_manifest.json`, and per-rank GPU/CPU monitoring
-files are written below each `OUT_DIR`.
-
-## Tests
-
-Run the CPU unit and migration checks with:
-
-```bash
-PYTHONPATH=src python -m unittest discover -s tests/unit -p 'test_*.py'
-```
+The script reads `run_manifest.json`, places each shard according to the
+motion and echo ranges in its filename, and writes `imout.hdr` and
+`imout.cfl`. The same command works for single- and multi-node output. The
+assembled CFL layout is `[motion, 1, 1, echo, 1, 1, z, y, x]`.
