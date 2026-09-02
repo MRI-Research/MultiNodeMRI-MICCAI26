@@ -79,7 +79,7 @@ class TvmReconstructor:
         dual_q,
         B_local,
         l2_coupling=False,
-        lamda=1e-6,
+        lamda=1e-5,
         sigma=0.01,
         tau=0.01,
         max_iter=10,
@@ -524,7 +524,7 @@ def main(argv=None) -> int:
         "--lamda",
         dest="lamda",
         type=float,
-        default=1e-6,
+        default=1e-5,
         help="Regularization for motion.",
     )
     parser.add_argument(

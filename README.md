@@ -73,7 +73,8 @@ toporecon prepare "$RAW_DATA_DIR" \
 ```
 
 This writes `resp.hdr/.cfl`, `mps.hdr/.cfl`, and `manifest.json` to
-`PREPARED_DIR`.
+`PREPARED_DIR`. `--device 0` tells JSENSE to use GPU 0; change the number to
+select another GPU, or use `--device -1` for CPU execution (much slower).
 
 GPU JSENSE can show small run-to-run floating-point differences because its
 gridding uses atomic additions. For reproducible comparisons, reconstruct the
@@ -91,7 +92,7 @@ when needed.
 
 ```bash
 export OUTPUT_DIR=/path/to/output
-export MPI_RANKS=1
+MPI_RANKS=1  # total number of MPI processes; normally one per GPU
 
 mpiexec -n "$MPI_RANKS" toporecon reconstruct --algorithm tvme -- \
   --multi-gpu \
@@ -103,7 +104,7 @@ mpiexec -n "$MPI_RANKS" toporecon reconstruct --algorithm tvme -- \
   --motion-groups 1 \
   --echo-groups 1 \
   --fov-scale 1.0 1.0 1.0 \
-  --lambda-motion 1e-4 \
+  --lambda-motion 1e-5 \
   --lambda-echo 1e-5 \
   --l2-coupling \
   --max-iter 300 \
@@ -111,10 +112,25 @@ mpiexec -n "$MPI_RANKS" toporecon reconstruct --algorithm tvme -- \
   "$RAW_DATA_DIR" imout
 ```
 
-`motion-groups * echo-groups` must equal the number of physical compute
-nodes, not the number of MPI ranks. A single-node run uses a `1 x 1` grid; a
-four-node run can use `2 x 2`. Within each node, MPI ranks divide the receiver
-coils across the local GPUs.
+`MPI_RANKS=1` is only a shell variable, so the example is equivalent to
+`mpiexec -n 1`. An MPI rank is one reconstruction process; normally, use one
+rank per GPU.
+
+The motion/echo grid is assigned per physical node: each node reconstructs one
+motion-group/echo-group tile, while the ranks on that node divide its receiver
+coils. Therefore `motion-groups * echo-groups` equals the number of physical
+nodes, whereas `MPI_RANKS` equals the total number of GPUs:
+
+| Allocation | `MPI_RANKS` | Motion x echo grid |
+| --- | ---: | ---: |
+| 1 node, 1 GPU | 1 | `1 x 1` |
+| 1 node, 4 GPUs | 4 | `1 x 1` |
+| 4 nodes, 4 GPUs per node | 16 | `2 x 2` |
+
+Keep `--multi-gpu` whenever a node runs more than one rank. It maps local rank
+0 to GPU 0, local rank 1 to GPU 1, and so on. Without it, every rank uses
+`--device 0` and all processes would compete for the same GPU. With only one
+rank per node, `--multi-gpu` can be omitted.
 
 ### Main parameters
 
@@ -132,16 +148,17 @@ coils across the local GPUs.
 | `tol` | Relative L2-change stopping threshold. The current reconstruction entry points use the fixed value `1e-3`. |
 | `--max-iter` | Maximum number of PDHG iterations; default `300`. |
 | `--readout-fraction` | Fraction of readout samples used for reconstruction; default `0.98`. |
-| `--multi-gpu` | Assign each node-local MPI rank to the GPU with the same local rank. |
+| `MPI_RANKS` / `mpiexec -n` | Total number of MPI processes; normally the total number of allocated GPUs. |
+| `--multi-gpu` | Put different ranks on different local GPUs; required when using multiple ranks per node. |
 | `--l2-coupling` | Couple motion regularization across echoes. |
 
 The algorithm-specific lambda options and defaults are:
 
 | Algorithm | Lambda options |
 | --- | --- |
-| TVM | `--lambda-motion 1e-6` |
-| TVME | `--lambda-motion 1e-4`, `--lambda-echo 1e-5` |
-| TVMW | `--lambda-motion 1e-6`, `--lambda-echo-wavelet 1e-6`, `--lambda-spatial-wavelet 1e-6` |
+| TVM | `--lambda-motion 1e-5` |
+| TVME | `--lambda-motion 1e-5`, `--lambda-echo 1e-5` |
+| TVMW | `--lambda-motion 1e-5`, `--lambda-echo-wavelet 1e-5`, `--lambda-spatial-wavelet 1e-5` |
 
 Each physical node writes one shard named
 `imout_e<ECHO_START>-<ECHO_END>_m<MOTION_START>-<MOTION_END>.hdr/.cfl`;
@@ -155,7 +172,15 @@ After the MPI job finishes, assemble all grid shards into one image:
 python scripts/stitch_shards.py "$OUTPUT_DIR"
 ```
 
-The script reads `run_manifest.json`, places each shard according to the
-motion and echo ranges in its filename, and writes `imout.hdr` and
-`imout.cfl`. The same command works for single- and multi-node output. The
+The input shard prefix does not need to be `imout`: by default, the script
+reads `output_stem` from `run_manifest.json`. Use `--input-prefix PREFIX` only
+when overriding that recorded value. The final filename defaults to
+`imout.hdr/.cfl`; choose another name with:
+
+```bash
+python scripts/stitch_shards.py "$OUTPUT_DIR" --output-name final_image
+```
+
+The script places each shard according to the motion and echo ranges in its
+filename. The same command works for single- and multi-node output, and the
 assembled CFL layout is `[motion, 1, 1, echo, 1, 1, z, y, x]`.

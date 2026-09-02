@@ -218,7 +218,7 @@ class PtwtWaveletOps:
 class TvmwReconstructor:
     def __init__(self, ksp, coord, dcf, mps, resp, dual_q, B_local,
                  l2_coupling=False,
-                 lambda1=1e-6, lambda2=1e-6, lambda3=1e-6, sigma=0.1, tau=0.1,
+                 lambda1=1e-5, lambda2=1e-5, lambda3=1e-5, sigma=0.1, tau=0.1,
                  max_iter=10, tol=0.01,device=sp.cpu_device, margin=2,
                  E_total=None, e0=None, e1=None, echo_left_peer=None, echo_right_peer=None,
                  B_total=None, b0=None, b1=None, motion_left_peer=None, motion_right_peer=None,
@@ -800,11 +800,11 @@ def main(argv=None) -> int:
                         help='Readout fractions.')
     parser.add_argument('--num-bins', '--num_bins', dest='num_bins', type=int, default=6,
                         help='Number of phases.')
-    parser.add_argument('--lambda-motion', '--lambda1', dest='lambda1', type=float, default=1e-6,
+    parser.add_argument('--lambda-motion', '--lambda1', dest='lambda1', type=float, default=1e-5,
                         help='Regularization for motion.')
-    parser.add_argument('--lambda-echo-wavelet', '--lambda2', dest='lambda2', type=float, default=1e-6,
+    parser.add_argument('--lambda-echo-wavelet', '--lambda2', dest='lambda2', type=float, default=1e-5,
                         help='Regularization for the db1 echo wavelet.')
-    parser.add_argument('--lambda-spatial-wavelet', '--lambda3', dest='lambda3', type=float, default=1e-6,
+    parser.add_argument('--lambda-spatial-wavelet', '--lambda3', dest='lambda3', type=float, default=1e-5,
                         help='Regularization for the db6 spatial wavelet.')
     parser.add_argument('--max-iter', '--max_iter', dest='max_iter', type=int, default=300,
                         help='Maximum epochs.')

@@ -148,6 +148,7 @@ def stitch(
     directory: Path,
     *,
     stem: str | None = None,
+    output_name: str = "imout",
     output: Path | None = None,
     overwrite: bool = False,
 ) -> Path:
@@ -160,7 +161,7 @@ def stitch(
     output_shape, shards = _validate_shards(
         _discover_shards(directory, stem), manifest
     )
-    requested_output = output or directory / stem
+    requested_output = output or directory / output_name
     if requested_output.suffix not in {"", ".hdr", ".cfl"}:
         raise ValueError("--output must be a base path or end in .hdr/.cfl.")
     output_base = cfl.base_path(requested_output).expanduser().resolve()
@@ -208,14 +209,29 @@ def stitch(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input_dir", type=Path)
-    parser.add_argument("--stem", help="Override run_manifest.json output_stem.")
-    parser.add_argument("--output", type=Path, help="Output base; default INPUT_DIR/STEM.")
+    parser.add_argument(
+        "--input-prefix",
+        "--stem",
+        dest="stem",
+        help="Input shard prefix; default: output_stem from run_manifest.json.",
+    )
+    parser.add_argument(
+        "--output-name",
+        default="imout",
+        help="Final filename stem inside INPUT_DIR; default: imout.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Optional full output path; overrides --output-name.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     output = stitch(
         args.input_dir,
         stem=args.stem,
+        output_name=args.output_name,
         output=args.output,
         overwrite=args.overwrite,
     )

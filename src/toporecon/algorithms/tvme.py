@@ -62,7 +62,7 @@ def center_crop_zyx(arr, out_shape_zyx):
 class TvmeReconstructor:
     def __init__(self, ksp, coord, dcf, mps, resp, dual_q, B_local,
                  l2_coupling=False,
-                 lamda_m=1e-6, lamda_e=1e-5, sigma=0.01, tau=0.01,
+                 lamda_m=1e-5, lamda_e=1e-5, sigma=0.01, tau=0.01,
                  max_iter=10, tol=0.001, margin=10, device=sp.cpu_device,
                  E_total=None, e0=None, e1=None, echo_left_peer=None, echo_right_peer=None,
                  B_total=None, b0=None, b1=None, motion_left_peer=None, motion_right_peer=None,
@@ -925,7 +925,7 @@ def main(argv=None) -> int:
                         help='Readout fractions.')
     parser.add_argument('--num-bins', '--num_bins', dest='num_bins', type=int, default=6,
                         help='Number of phases.')
-    parser.add_argument('--lambda-motion', '--lamda_m', dest='lamda_m', type=float, default=1e-4,
+    parser.add_argument('--lambda-motion', '--lamda_m', dest='lamda_m', type=float, default=1e-5,
                         help='Regularization for motion.')
     parser.add_argument('--lambda-echo', '--lamda_e', dest='lamda_e', type=float, default=1e-5,
                         help='Regularization for echo.')
