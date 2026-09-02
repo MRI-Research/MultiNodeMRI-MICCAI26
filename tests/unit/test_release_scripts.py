@@ -10,6 +10,7 @@ DELTA_SCRIPTS = tuple(
     REPOSITORY / "examples" / f"deltaai_{algorithm}.slurm"
     for algorithm in ("tvm", "tvme", "tvmw")
 )
+DELTA_PREPARE_SCRIPT = REPOSITORY / "examples" / "deltaai_prepare.slurm"
 
 
 class ReleaseScriptTests(unittest.TestCase):
@@ -53,6 +54,38 @@ class ReleaseScriptTests(unittest.TestCase):
                 self.assertIn('MAX_ITER="${MAX_ITER:-10}"', source)
                 self.assertIn('MOTION_GROUPS="${MOTION_GROUPS:-2}"', source)
                 self.assertIn('ECHO_GROUPS="${ECHO_GROUPS:-2}"', source)
+
+    def test_deltaai_prepare_uses_one_gpu_and_the_prepare_contract(self) -> None:
+        source = DELTA_PREPARE_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("#SBATCH -N 1", source)
+        self.assertIn("#SBATCH -n 1", source)
+        self.assertIn("#SBATCH --ntasks-per-node=1", source)
+        self.assertIn("#SBATCH --cpus-per-task=8", source)
+        self.assertIn("#SBATCH --gpus-per-node=1", source)
+        self.assertIn('INPUT_DIR="${INPUT_DIR:?', source)
+        self.assertIn('PREPARED_DIR="${PREPARED_DIR:?', source)
+        self.assertIn("for base in ksp ktraj dens", source)
+        self.assertIn("for name in imageDim.txt voxelSize.txt tr.txt", source)
+        self.assertIn('READOUT_FRACTION="${READOUT_FRACTION:-0.95}"', source)
+        self.assertIn(
+            'COORDINATE_SCALING="${COORDINATE_SCALING:-legacy_max}"',
+            source,
+        )
+        self.assertIn(
+            '"${PY}" -m toporecon --verbose prepare "${INPUT_DIR}"',
+            source,
+        )
+        self.assertIn(
+            "for name in resp.hdr resp.cfl mps.hdr mps.cfl manifest.json",
+            source,
+        )
+        self.assertIn('OVERWRITE_PREPARED="${OVERWRITE_PREPARED:-0}"', source)
+        self.assertIn('[[ "${DEVICE}" == "0" ]]', source)
+        self.assertIn("--gpu-bind=closest", source)
+        self.assertNotIn("--multi-gpu", source)
+        self.assertNotIn("#SBATCH -A", source)
+        self.assertIsNone(re.search(r"/(?:u|home)/[^/]+/", source))
 
 
 if __name__ == "__main__":
