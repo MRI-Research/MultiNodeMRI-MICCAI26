@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""TVM topology-aware PDHG reconstruction.
-
-The numerical updates and communication schedule are migrated from
-``recon_motion_resolved_pdhg_3Dparallel.py``.  Data access, distributed
-runtime setup, NUFFT dispatch, and output metadata follow the verified TVME
-release implementation.
-"""
+"""Motion total-variation reconstruction on a distributed node grid."""
 
 import argparse
 import json
@@ -82,8 +76,8 @@ class TvmReconstructor:
         lamda=1e-5,
         sigma=0.01,
         tau=0.01,
-        max_iter=10,
-        tol=0.01,
+        max_iter=300,
+        tol=1e-3,
         margin=10,
         device=sp.cpu_device,
         B_total=None,
@@ -534,6 +528,12 @@ def main(argv=None) -> int:
         type=int,
         default=300,
         help="Maximum epochs.",
+    )
+    parser.add_argument(
+        "--tol",
+        type=float,
+        default=1e-3,
+        help="Relative L2-change stopping threshold.",
     )
     parser.add_argument(
         "--acceleration",
@@ -990,7 +990,7 @@ def main(argv=None) -> int:
         lamda=args.lamda,
         sigma=1 / 6,
         tau=1 / 6,
-        tol=0.001,
+        tol=args.tol,
         margin=0,
         device=device,
         B_total=args.num_bins,
@@ -1054,8 +1054,10 @@ def main(argv=None) -> int:
             "parameters": {
                 "readout_fraction": args.frac,
                 "num_bins": args.num_bins,
+                "num_echoes": E_total,
                 "lambda_motion": args.lamda,
                 "max_iter": args.max_iter,
+                "tol": args.tol,
                 "acceleration": args.acc,
                 "fov_scale_zyx": list(args.fov_scale),
                 "crop_to_original": args.crop_to_orig,

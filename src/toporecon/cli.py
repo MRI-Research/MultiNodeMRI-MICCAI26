@@ -1,4 +1,4 @@
-"""Command-line interface for inspection, preparation, and reconstruction."""
+"""Command-line interface for preparation, reconstruction, and output assembly."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     reconstruct_parser = subparsers.add_parser(
         "reconstruct",
-        help="Run a migrated topology-aware reconstruction algorithm.",
+        help="Run a topology-aware reconstruction algorithm.",
     )
     reconstruct_parser.add_argument("--algorithm", choices=ALGORITHMS, required=True)
     reconstruct_parser.add_argument(
@@ -105,6 +105,30 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help="Arguments forwarded to the selected algorithm.",
     )
+
+    stitch_parser = subparsers.add_parser(
+        "stitch",
+        help="Assemble reconstruction shards into one CFL/HDR image.",
+    )
+    stitch_parser.add_argument("input_dir", type=Path)
+    stitch_parser.add_argument(
+        "--input-prefix",
+        "--stem",
+        dest="stem",
+        help="Shard prefix; default: output_stem from run_manifest.json.",
+    )
+    output_group = stitch_parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--output-name",
+        default="imout",
+        help="Final filename inside INPUT_DIR; default: imout.",
+    )
+    output_group.add_argument(
+        "--output",
+        type=Path,
+        help="Full path for the final image.",
+    )
+    stitch_parser.add_argument("--overwrite", action="store_true")
 
     return parser
 
@@ -138,6 +162,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             from toporecon.algorithms.tvmw import main as tvmw_main
 
             return tvmw_main(forwarded)
+
+    if args.command == "stitch":
+        from toporecon.postprocessing import stitch
+
+        output = stitch(
+            args.input_dir,
+            stem=args.stem,
+            output_name=args.output_name,
+            output=args.output,
+            overwrite=args.overwrite,
+        )
+        print(f"Wrote {output}.hdr and {output}.cfl")
+        return 0
 
     args.work_dir.mkdir(parents=True, exist_ok=True)
 

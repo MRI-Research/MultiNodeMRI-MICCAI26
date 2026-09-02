@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""TVME topology-aware PDHG reconstruction.
-
-This is the first core algorithm migrated into the MICCAI package. Its PDHG
-updates and communication schedule intentionally remain equivalent to the
-current research implementation while data access and NUFFT calls move behind
-release interfaces.
-"""
+"""Motion- and echo-TV reconstruction on a distributed node grid."""
 
 import argparse
 import json
@@ -63,7 +57,7 @@ class TvmeReconstructor:
     def __init__(self, ksp, coord, dcf, mps, resp, dual_q, B_local,
                  l2_coupling=False,
                  lamda_m=1e-5, lamda_e=1e-5, sigma=0.01, tau=0.01,
-                 max_iter=10, tol=0.001, margin=10, device=sp.cpu_device,
+                 max_iter=300, tol=1e-3, margin=10, device=sp.cpu_device,
                  E_total=None, e0=None, e1=None, echo_left_peer=None, echo_right_peer=None,
                  B_total=None, b0=None, b1=None, motion_left_peer=None, motion_right_peer=None,
                  bin_edges=None,
@@ -154,9 +148,6 @@ class TvmeReconstructor:
         self.mps_dev = sp.to_device(self.mps, self.device)
         self.mps_conj = self.xp.conj(self.mps_dev)
 
-        # use pdhg
-        self.memory_efficient = True
-
     ## Forward Difference Operators
     def dxfc(self, x):
         diff = self.xp.zeros(x.shape, self.xp.complex64)
@@ -215,296 +206,6 @@ class TvmeReconstructor:
 
     ## Main PDHG function
     def pdhg(self, u_bar, u_now, p_m, p_ex, p_ey, p_ez, q_data, it):
-        ##----------------------------##
-        ## @Store the current iterate ##
-        ##----------------------------##
-        u_old = self.xp.copy(u_now)
-
-        req_absp_sq = None
-
-        # 1-1) Forward difference in the motion state dimension
-        # 1-1-A） communicate u_0
-        ghost_m_right_first = self.xp.empty_like(u_bar[0])  # (E, X, Y, Z)
-        ghost_m_right_first = self.xp.ascontiguousarray(ghost_m_right_first)
-        sendbuf_m = self.xp.ascontiguousarray(u_bar[0])     # send my first bin to left
-
-        tag_mdelta = self.tagger(it, axis="motion", kind="delta")
-        reqs_mdelta = self.dist_grid.halo_exchange(
-            sendbuf_m, ghost_m_right_first,
-            send_peer=self.motion_left_peer,
-            recv_peer=self.motion_right_peer,
-            tag=tag_mdelta
-        )
-
-        # 2-1) Forward difference in the echo dimension
-        # (B, E, X, Y, Z)
-        diff_e = self.xp.zeros_like(u_bar)
-
-        # local difference
-        if self.E > 1:
-            diff_e[:, :-1] = u_bar[:, 1:] - u_bar[:, :-1]
-
-        # 2-1-A) start async Sendrecv for ghost_right_first
-        ghost_right_first = self.xp.zeros_like(u_bar[:, 0]) # (B, X, Y, Z)
-        ghost_right_first = self.xp.ascontiguousarray(ghost_right_first)
-        sendbuf = self.xp.ascontiguousarray(u_bar[:, 0])
-
-        if CUPY_AVAILABLE and isinstance(sendbuf, cp.ndarray):
-            cp.cuda.get_current_stream().synchronize()
-
-        tag_delta = self.tagger(it, axis="echo", kind="delta")
-        reqs_delta = self.dist_grid.halo_exchange(
-            sendbuf, ghost_right_first,
-            send_peer=self.echo_left_peer,  # send to left
-            recv_peer=self.echo_right_peer, # recv from right
-            tag=tag_delta
-        )
-
-        # 3-1) Computing (FSu^k - y)
-        # move to GPU once
-        # mps_dev = sp.to_device(self.mps, self.device)
-        for b in range(self.B):
-            tmp = self.xp.zeros_like(self.dual_q[b])
-            for c in range(self.C):
-                mps_c = self.mps_dev[c]
-                for e in range(self.E):
-                    tmp[e, c] = (
-                        self.nufft.forward(u_bar[b, e] * mps_c, b)
-                        - self.bksp[b][e][c]
-                    )
-            # 3-2) Proximal mapping
-            q_data[b] = (q_data[b] + self.sigma * tmp) / (1 + self.sigma)
-
-        # 1-1-B) compute diff_m
-        diff_m = self.xp.zeros_like(u_bar)
-        if self.B > 1:
-            diff_m[:-1] = u_bar[1:] - u_bar[:-1]
-        MPI.Request.Waitall(reqs_mdelta)
-        if not self.is_motion_last:
-            diff_m[-1] = ghost_m_right_first - u_bar[-1]
-        else:
-            diff_m[-1] = 0
-
-        # 1-2) Gradient ascent update
-        p_m = p_m + self.sigma * diff_m
-        diff_m = None
-
-        # 1-3-A) Proximal mapping: start async allreduce for L2-coupling
-        if self.l2_coupling: # L2-coupling: # TODO: test
-            # communicate echo data among nodes
-            absp_sq = self.xp.sum(self.xp.abs(p_m) ** 2, axis=1, keepdims=True)
-            # make sure slices are contiguous
-            absp_sq = self.xp.ascontiguousarray(absp_sq)
-
-            # global Allreduce: need CUDA-aware MPI, will change to async communication later
-            # only leader of each node group participates
-            if self.leader_comm is not None:
-                if CUPY_AVAILABLE and isinstance(absp_sq, cp.ndarray):
-                    cp.cuda.get_current_stream().synchronize()
-
-                # non-blocking Allreduce
-                req_absp_sq = self.leader_comm.Iallreduce(MPI.IN_PLACE, absp_sq, op=MPI.SUM)
-                # self.leader_comm.Allreduce(MPI.IN_PLACE, absp_sq, op=MPI.SUM)
-
-        else: # L1-coupling
-            if 0: # real/imag
-                absp_r = self.xp.abs(self.xp.real(p_m))
-                absp_i = self.xp.abs(self.xp.imag(p_m))
-                p_m = self.xp.real(p_m)/self.xp.maximum(1, absp_r/self.lamda_m) \
-                        + 1j * self.xp.imag(p_m)/self.xp.maximum(1, absp_i/self.lamda_m)
-            else: # complex
-                absp = self.xp.abs(p_m)
-                p_m = p_m/self.xp.maximum(1, absp/self.lamda_m)
-
-
-        # 2-1-B) wait comm and fill in ghost cell
-        MPI.Request.Waitall(reqs_delta)
-        if not self.is_global_last:
-            diff_e[:, -1] = ghost_right_first - u_bar[:, -1]
-        else:
-            # last global slice, no right neighbor
-            diff_e[:, -1] = 0
-
-        # 2-2) Forward gradient in the image space of diff_e and gradient ascent update
-        p_ex = p_ex + self.sigma * self.dxfc(diff_e)
-        p_ey = p_ey + self.sigma * self.dyfc(diff_e)
-        p_ez = p_ez + self.sigma * self.dzfc(diff_e)
-
-        # 2-3) Proximal mapping
-        if 0: #isotropic TV - ALL # TODO: test
-            absp = self.xp.zeros_like(p_ex[0], dtype=self.xp.float32)
-            for b in range(self.B):
-                absp += self.xp.abs(p_ex[b]) ** 2 + self.xp.abs(p_ey[b]) ** 2 + self.xp.abs(p_ez[b]) ** 2
-            absp = absp ** 0.5
-            for b in range(self.B):
-                p_ex[b] = p_ex[b]/self.xp.maximum(1, absp/self.lamda_e)
-                p_ey[b] = p_ey[b]/self.xp.maximum(1, absp/self.lamda_e)
-                p_ez[b] = p_ez[b]/self.xp.maximum(1, absp/self.lamda_e)
-
-        else: #isotropic TV - motion-by-motion
-            if 0:
-                absp_r = self.xp.abs(self.xp.real(p_ex)) + self.xp.abs(self.xp.real(p_ey)) + self.xp.abs(self.xp.real(p_ez))
-                absp_i = self.xp.abs(self.xp.imag(p_ex)) + self.xp.abs(self.xp.imag(p_ey)) + self.xp.abs(self.xp.imag(p_ez))
-                p_ex = self.xp.real(p_ex)/self.xp.maximum(1, absp_r/self.lamda_e) + 1j * self.xp.imag(p_ex)/self.xp.maximum(1, absp_i/self.lamda_e)
-                p_ey = self.xp.real(p_ey)/self.xp.maximum(1, absp_r/self.lamda_e) + 1j * self.xp.imag(p_ey)/self.xp.maximum(1, absp_i/self.lamda_e)
-                p_ez = self.xp.real(p_ez)/self.xp.maximum(1, absp_r/self.lamda_e) + 1j * self.xp.imag(p_ez)/self.xp.maximum(1, absp_i/self.lamda_e)
-            else:
-                absp = (self.xp.abs(p_ex) ** 2 + self.xp.abs(p_ey) ** 2 + self.xp.abs(p_ez) ** 2) ** 0.5
-                p_ex = p_ex/self.xp.maximum(1, absp/self.lamda_e)
-                p_ey = p_ey/self.xp.maximum(1, absp/self.lamda_e)
-                p_ez = p_ez/self.xp.maximum(1, absp/self.lamda_e)
-
-        if 0: # DEBUG --> Test Multi GPUs
-            ttmp = self.xp.zeros_like(u_bar)
-            for b in range(self.B): # 6
-                tmp =  self.xp.zeros_like(u_bar[b])
-                for c in range(self.C): # 40
-                    for e in range(self.E): # 2
-                        mps_c = sp.to_device(self.mps[c], self.device)
-                        mps_c = self.xp.ones_like(mps_c)
-                        tmp[e] += mps_c
-
-                if self.comm is not None:
-                    self.comm.allreduce(tmp)
-
-                ttmp[b] += tmp[e]
-
-        # 1-3-B) Proximal mapping: wait comm, Bcast and apply prox
-        if self.l2_coupling:
-            if self.leader_comm is not None and req_absp_sq is not None:
-                req_absp_sq.Wait()
-            if self.group_comm is not None:
-                if CUPY_AVAILABLE and isinstance(absp_sq, cp.ndarray):
-                    cp.cuda.get_current_stream().synchronize()
-                self.group_comm.Bcast(absp_sq, root=0)
-            absp = self.xp.sqrt(absp_sq)
-            denom = self.xp.maximum(self.xp.asarray(1.0, dtype=absp.dtype), absp / self.lamda_m)
-            p_m = p_m / denom
-
-        # 4-1) Compute divergene w/adjoint of the forward difference (-backward)
-        # divp_m (motion)
-        # 4-1-A) communicate p_m
-        ghost_m_left_last = self.xp.empty_like(p_m[0])      # (E, X, Y, Z)
-        ghost_m_left_last = self.xp.ascontiguousarray(ghost_m_left_last)
-        sendbuf_m = self.xp.ascontiguousarray(p_m[-1])      # send my last p to right
-
-        tag_mdiv = self.tagger(it, axis="motion", kind="div")
-        reqs_mdiv = self.dist_grid.halo_exchange(
-            sendbuf_m, ghost_m_left_last,
-            send_peer=self.motion_right_peer,
-            recv_peer=self.motion_left_peer,
-            tag=tag_mdiv
-        )
-
-        # divp_e (echo)
-        # 4-1-2) Compute divp_e
-        divp = self.dxbc(p_ex) + self.dybc(p_ey) + self.dzbc(p_ez)
-        divp_e = self.xp.zeros_like(u_now)
-
-        # local divergence
-        if self.E > 1:
-            divp_e[:, 1:] = divp[:, :-1] - divp[:, 1:]
-
-        # local first echo, need last echo from left neighbor
-        # if not self.is_global_first:
-        # 4-1-2-A) start async Sendrecv for ghost_left_last
-        ghost_left_last = self.xp.empty_like(divp[:, 0]) # (B, X, Y, Z)
-        ghost_left_last = self.xp.ascontiguousarray(ghost_left_last)
-        sendbuf = self.xp.ascontiguousarray(divp[:, -1])
-
-        if CUPY_AVAILABLE and isinstance(sendbuf, cp.ndarray):
-            cp.cuda.get_current_stream().synchronize()
-
-        tag_div = self.tagger(it, axis="echo", kind="div")
-        reqs_div = self.dist_grid.halo_exchange(
-            sendbuf, ghost_left_last,
-            send_peer=self.echo_right_peer,  # send to right
-            recv_peer=self.echo_left_peer,   # recv from left
-            tag=tag_div
-        )
-
-        # 4-2) Compute (FS)^H q_data^k+1
-        tmp = self.xp.zeros_like(u_now)
-        for b in range(self.B):
-            for c in range(self.C):
-                mps_c_conj = self.mps_conj[c]
-                for e in range(self.E):
-                    tmp[b, e] += (
-                        self.nufft.adjoint(
-                            self.bdcf[b] * q_data[b][e][c],
-                            b,
-                        )
-                        * mps_c_conj
-                    )
-
-        # all-reduce inside the group
-        # reduce all at once
-        # nccl is async, so we need to insert events to sync computation and communication streams
-        if self.use_nccl_reduce and isinstance(tmp, cp.ndarray):
-            comp_stream = cp.cuda.get_current_stream()
-            comm_stream = self.nccl_group.stream
-            evt = cp.cuda.Event()
-            evt.record(comp_stream)
-            # communication stream waits for computation to finish
-            comm_stream.wait_event(evt)
-            with comm_stream:
-                self.nccl_group.alreduce_sum_(tmp)
-
-            evt2 = cp.cuda.Event()
-            evt2.record(comm_stream)
-            comp_stream.wait_event(evt2)
-
-        elif self.need_coil_reduce:
-            # fallback to CPU/MPI allreduce
-            buf = cp.asnumpy(tmp) if CUPY_AVAILABLE and isinstance(tmp, cp.ndarray) else np.asarray(tmp)
-            self.group_comm.Allreduce(MPI.IN_PLACE, buf, op=MPI.SUM)
-            if CUPY_AVAILABLE and isinstance(tmp, cp.ndarray):
-                tmp.set(buf)
-            else:
-                tmp[...] = buf
-
-        # 4-1-B) compute div p_m
-        divp_m = self.xp.zeros_like(u_now)
-        if self.B > 1:
-            divp_m[1:] = p_m[:-1] - p_m[1:]
-
-        MPI.Request.Waitall(reqs_mdiv)
-
-        if self.is_motion_first:
-            divp_m[0] = -p_m[0]
-        else:
-            divp_m[0] = ghost_m_left_last - p_m[0]
-
-        if self.is_motion_last:
-            if self.B > 1:
-                divp_m[-1] = p_m[-2]
-            else:
-                divp_m[0] = 0 if self.is_motion_first else ghost_m_left_last
-
-        # 4-1-2-B) wait comm and fill in ghost cell
-        MPI.Request.Waitall(reqs_div)
-        # echo=0
-        if self.is_global_first:
-            divp_e[:, 0] = -divp[:, 0]
-        elif self.E == 1 and self.is_global_last:
-            divp_e[:, 0] = ghost_left_last
-        else:
-            divp_e[:, 0] = ghost_left_last - divp[:, 0]
-        if self.is_global_last and self.E > 1:
-            divp_e[:, -1] = divp[:, -2]
-
-        # 4-3) Gradient descent
-        sp.axpy(u_now, -self.tau, tmp + divp_m + divp_e)
-
-        ##---------------------##
-        ## @Extragradient step ##
-        ##---------------------##
-        u_bar = 2*u_now - u_old
-
-        return u_bar, u_now, p_m, p_ex, p_ey, p_ez, q_data
-
-    ## Main PDHG function
-    def pdhg_memory_efficient(self, u_bar, u_now, p_m, p_ex, p_ey, p_ez, q_data, it):
 
         ##----------------------------##
         ## @Store the current iterate ##
@@ -581,7 +282,7 @@ class TvmeReconstructor:
         diff_m = None
 
         # 1-3-A) Proximal mapping: start async allreduce for L2-coupling
-        if self.l2_coupling: # L2-coupling: # TODO: test
+        if self.l2_coupling:  # L2 coupling
 
             # local sum of ||p_m||^2 over echoes
             absp_sq = self.xp.sum(self.xp.abs(p_m) ** 2, axis=1, keepdims=True)
@@ -596,15 +297,9 @@ class TvmeReconstructor:
                 req_absp_sq = self.leader_comm.Iallreduce(MPI.IN_PLACE, absp_sq, op=MPI.SUM)
 
         else: # L1-coupling
-            if 0: # real/imag
-                absp_r = self.xp.abs(self.xp.real(p_m))
-                absp_i = self.xp.abs(self.xp.imag(p_m))
-                p_m = self.xp.real(p_m)/self.xp.maximum(1, absp_r/self.lamda_m) \
-                        + 1j * self.xp.imag(p_m)/self.xp.maximum(1, absp_i/self.lamda_m)
-            else: # complex
-                absp = self.xp.abs(p_m)
-                p_m = p_m/self.xp.maximum(1, absp/self.lamda_m)
-                absp = None
+            absp = self.xp.abs(p_m)
+            p_m = p_m/self.xp.maximum(1, absp/self.lamda_m)
+            absp = None
 
         # 2-1-B) wait comm and fill in ghost cell
         MPI.Request.Waitall(reqs_delta)
@@ -620,44 +315,12 @@ class TvmeReconstructor:
         p_ez = p_ez + self.sigma * self.dzfc(diff_e)
         diff_e = None
 
-        # 2-3) Proximal mapping
-        if 0: #isotropic TV - ALL # TODO: test
-            absp = self.xp.zeros_like(p_ex[0], dtype=self.xp.float32)
-            for b in range(self.B):
-                absp += self.xp.abs(p_ex[b]) ** 2 + self.xp.abs(p_ey[b]) ** 2 + self.xp.abs(p_ez[b]) ** 2
-            absp = absp ** 0.5
-            for b in range(self.B):
-                p_ex[b] = p_ex[b]/self.xp.maximum(1, absp/self.lamda_e)
-                p_ey[b] = p_ey[b]/self.xp.maximum(1, absp/self.lamda_e)
-                p_ez[b] = p_ez[b]/self.xp.maximum(1, absp/self.lamda_e)
-
-        else: #isotropic TV - motion-by-motion
-            if 0:
-                absp_r = self.xp.abs(self.xp.real(p_ex)) + self.xp.abs(self.xp.real(p_ey)) + self.xp.abs(self.xp.real(p_ez))
-                absp_i = self.xp.abs(self.xp.imag(p_ex)) + self.xp.abs(self.xp.imag(p_ey)) + self.xp.abs(self.xp.imag(p_ez))
-                p_ex = self.xp.real(p_ex)/self.xp.maximum(1, absp_r/self.lamda_e) + 1j * self.xp.imag(p_ex)/self.xp.maximum(1, absp_i/self.lamda_e)
-                p_ey = self.xp.real(p_ey)/self.xp.maximum(1, absp_r/self.lamda_e) + 1j * self.xp.imag(p_ey)/self.xp.maximum(1, absp_i/self.lamda_e)
-                p_ez = self.xp.real(p_ez)/self.xp.maximum(1, absp_r/self.lamda_e) + 1j * self.xp.imag(p_ez)/self.xp.maximum(1, absp_i/self.lamda_e)
-            else:
-                absp = (self.xp.abs(p_ex) ** 2 + self.xp.abs(p_ey) ** 2 + self.xp.abs(p_ez) ** 2) ** 0.5
-                p_ex = p_ex/self.xp.maximum(1, absp/self.lamda_e)
-                p_ey = p_ey/self.xp.maximum(1, absp/self.lamda_e)
-                p_ez = p_ez/self.xp.maximum(1, absp/self.lamda_e)
-                absp = None
-
-        if 0: # DEBUG --> Test Multi GPUs
-            ttmp = self.xp.zeros_like(u_bar)
-            for b in range(self.B): # 6
-                tmp =  self.xp.zeros_like(u_bar[b])
-                for c in range(self.C): # 40
-                    for e in range(self.E): # 2
-                        mps_c = sp.to_device(self.mps[c], self.device)
-                        mps_c = self.xp.ones_like(mps_c)
-                        tmp[e] += mps_c
-
-                if self.comm is not None:
-                    self.comm.allreduce(tmp)
-                ttmp[b] += tmp[e]
+        # 2-3) Isotropic TV proximal mapping for each motion bin
+        absp = (self.xp.abs(p_ex) ** 2 + self.xp.abs(p_ey) ** 2 + self.xp.abs(p_ez) ** 2) ** 0.5
+        p_ex = p_ex/self.xp.maximum(1, absp/self.lamda_e)
+        p_ey = p_ey/self.xp.maximum(1, absp/self.lamda_e)
+        p_ez = p_ez/self.xp.maximum(1, absp/self.lamda_e)
+        absp = None
 
         # 1-3-B) Proximal mapping: wait comm, Bcast and apply prox
         if self.l2_coupling:
@@ -849,13 +512,8 @@ class TvmeReconstructor:
                         for it in range(self.max_iter):
                             primal_u_old = self.xp.copy(primal_u)
 
-                            # PDHG
-                            if self.memory_efficient:
-                                mrimg, primal_u, p_m, p_ex, p_ey, p_ez, q_data = \
-                                    self.pdhg_memory_efficient(mrimg, primal_u, p_m, p_ex, p_ey, p_ez, q_data, it)
-                            else:
-                                mrimg, primal_u, p_m, p_ex, p_ey, p_ez, q_data = \
-                                    self.pdhg(mrimg, primal_u, p_m, p_ex, p_ey, p_ez, q_data, it)
+                            mrimg, primal_u, p_m, p_ex, p_ey, p_ez, q_data = \
+                                self.pdhg(mrimg, primal_u, p_m, p_ex, p_ey, p_ez, q_data, it)
 
                             # global tol
                             # tol = ||u^k - u^{k-1}||_2 / ||u^k||_2
@@ -931,6 +589,8 @@ def main(argv=None) -> int:
                         help='Regularization for echo.')
     parser.add_argument('--max-iter', '--max_iter', dest='max_iter', type=int, default=300,
                         help='Maximum epochs.')
+    parser.add_argument('--tol', type=float, default=1e-3,
+                        help='Relative L2-change stopping threshold.')
     parser.add_argument('--acceleration', '--acc', dest='acc', type=int, default=1,
                         help='Reduction factor')
     parser.add_argument('--fov-scale', '--fov_scale', dest='fov_scale',
@@ -1305,7 +965,7 @@ def main(argv=None) -> int:
 
     mrimg = TvmeReconstructor(ksp, coord, dcf, mps, resp, dual_q, B_local, args.l2_coupling,
                             max_iter=args.max_iter, lamda_m=args.lamda_m, lamda_e=args.lamda_e,
-                            sigma=1/6, tau=1/6, tol=0.001, margin=0,
+                            sigma=1/6, tau=1/6, tol=args.tol, margin=0,
                             device=device, E_total=E_total, e0=e0, e1=e1,
                             echo_left_peer=grid.echo_left_peer, echo_right_peer=grid.echo_right_peer,
                             B_total=args.num_bins, b0=b0, b1=b1,
@@ -1359,9 +1019,11 @@ def main(argv=None) -> int:
             "parameters": {
                 "readout_fraction": args.frac,
                 "num_bins": args.num_bins,
+                "num_echoes": E_total,
                 "lambda_motion": args.lamda_m,
                 "lambda_echo": args.lamda_e,
                 "max_iter": args.max_iter,
+                "tol": args.tol,
                 "acceleration": args.acc,
                 "fov_scale_zyx": list(args.fov_scale),
                 "crop_to_original": args.crop_to_orig,

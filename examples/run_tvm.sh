@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Replace these paths and the MPI process count for the target system.
-RAW_DATA_DIR="${1:?usage: run_tvm.sh RAW_DATA_DIR PREPARED_DIR OUTPUT_DIR}"
-PREPARED_DIR="${2:?usage: run_tvm.sh RAW_DATA_DIR PREPARED_DIR OUTPUT_DIR}"
-OUTPUT_DIR="${3:?usage: run_tvm.sh RAW_DATA_DIR PREPARED_DIR OUTPUT_DIR}"
+# Override any value below through the environment when needed.
+RAW_DATA_DIR="${1:?Usage: run_tvm.sh RAW_DATA_DIR PREPARED_DIR OUTPUT_DIR}"
+PREPARED_DIR="${2:?Usage: run_tvm.sh RAW_DATA_DIR PREPARED_DIR OUTPUT_DIR}"
+OUTPUT_DIR="${3:?Usage: run_tvm.sh RAW_DATA_DIR PREPARED_DIR OUTPUT_DIR}"
+MPI_RANKS="${MPI_RANKS:-1}"
+OUTPUT_STEM="${OUTPUT_STEM:-imout}"
 
-mpiexec -n 1 toporecon reconstruct --algorithm tvm -- \
+mpiexec -n "$MPI_RANKS" toporecon reconstruct --algorithm tvm -- \
   --prepared-dir "$PREPARED_DIR" \
   --output-dir "$OUTPUT_DIR" \
-  --nufft-backend sigpy \
-  --num-bins 6 \
-  --motion-groups 1 \
-  --echo-groups 1 \
-  "$RAW_DATA_DIR" \
-  reconstruction
+  --device "${DEVICE:-0}" \
+  --nufft-backend "${NUFFT_BACKEND:-sigpy}" \
+  --readout-fraction "${READOUT_FRACTION:-0.98}" \
+  --num-bins "${NUM_BINS:-6}" \
+  --motion-groups "${MOTION_GROUPS:-1}" \
+  --echo-groups "${ECHO_GROUPS:-1}" \
+  --fov-scale "${FOV_SCALE_Z:-1.0}" "${FOV_SCALE_Y:-1.0}" "${FOV_SCALE_X:-1.0}" \
+  --lambda-motion "${LAMBDA_MOTION:-1e-5}" \
+  --tol "${TOL:-1e-3}" \
+  --max-iter "${MAX_ITER:-300}" \
+  --acceleration "${ACCELERATION:-1}" \
+  --l2-coupling \
+  --show-progress \
+  "$RAW_DATA_DIR" "$OUTPUT_STEM"
+
+# When a node launches more than one MPI rank, add --multi-gpu after the `--`.

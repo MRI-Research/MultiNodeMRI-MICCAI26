@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""TVMW topology-aware PDHG reconstruction.
-
-The motion and wavelet PDHG updates, PTWT transforms, and communication
-schedule remain equivalent to the research implementation while data access
-and NUFFT calls use the release interfaces.
-"""
+"""Motion- and wavelet-regularized reconstruction on a distributed node grid."""
 
 import argparse
 import json
@@ -219,7 +214,7 @@ class TvmwReconstructor:
     def __init__(self, ksp, coord, dcf, mps, resp, dual_q, B_local,
                  l2_coupling=False,
                  lambda1=1e-5, lambda2=1e-5, lambda3=1e-5, sigma=0.1, tau=0.1,
-                 max_iter=10, tol=0.01,device=sp.cpu_device, margin=2,
+                 max_iter=300, tol=1e-3, device=sp.cpu_device, margin=2,
                  E_total=None, e0=None, e1=None, echo_left_peer=None, echo_right_peer=None,
                  B_total=None, b0=None, b1=None, motion_left_peer=None, motion_right_peer=None,
                  bin_edges=None,
@@ -486,7 +481,7 @@ class TvmwReconstructor:
         # 02/23/2026: l2 coupling
 
         # 1-3-A) Proximal mapping: start async allreduce for L2-coupling
-        if self.l2_coupling: # L2-coupling: # TODO: test
+        if self.l2_coupling:  # L2 coupling
             # local sum of ||p_m||^2 over echoes
             absp_sq = self.xp.sum(self.xp.abs(dual_p_m) ** 2, axis=1, keepdims=True)
             absp_sq = self.xp.ascontiguousarray(absp_sq)
@@ -808,6 +803,8 @@ def main(argv=None) -> int:
                         help='Regularization for the db6 spatial wavelet.')
     parser.add_argument('--max-iter', '--max_iter', dest='max_iter', type=int, default=300,
                         help='Maximum epochs.')
+    parser.add_argument('--tol', type=float, default=1e-3,
+                        help='Relative L2-change stopping threshold.')
     parser.add_argument('--fov-scale', '--fov_scale', dest='fov_scale',
                         type=float, nargs=3, default=[1.0, 1.0, 1.0],
                         help="Reconstruction FOV scale factors in (z,y,x) (>1 increases FOV).")
@@ -1154,7 +1151,7 @@ def main(argv=None) -> int:
                             B_local, args.l2_coupling,
                             max_iter=args.max_iter, lambda1=args.lambda1, lambda2=args.lambda2,
                             lambda3=args.lambda3,
-                            sigma=1/6, tau=1/6, tol=0.001, margin=0,
+                            sigma=1/6, tau=1/6, tol=args.tol, margin=0,
                             device=device, E_total=E_total, e0=e0, e1=e1,
                             echo_left_peer=grid.echo_left_peer, echo_right_peer=grid.echo_right_peer,
                             B_total=args.num_bins, b0=b0, b1=b1,
@@ -1208,10 +1205,12 @@ def main(argv=None) -> int:
             "parameters": {
                 "readout_fraction": args.frac,
                 "num_bins": args.num_bins,
+                "num_echoes": E_total,
                 "lambda_motion": args.lambda1,
                 "lambda_echo_wavelet": args.lambda2,
                 "lambda_spatial_wavelet": args.lambda3,
                 "max_iter": args.max_iter,
+                "tol": args.tol,
                 "fov_scale_zyx": list(args.fov_scale),
                 "crop_to_original": args.crop_to_orig,
                 "l2_coupling": args.l2_coupling,

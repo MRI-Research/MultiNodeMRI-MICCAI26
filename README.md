@@ -95,7 +95,6 @@ export OUTPUT_DIR=/path/to/output
 MPI_RANKS=1  # total number of MPI processes; normally one per GPU
 
 mpiexec -n "$MPI_RANKS" toporecon reconstruct --algorithm tvme -- \
-  --multi-gpu \
   --prepared-dir "$PREPARED_DIR" \
   --output-dir "$OUTPUT_DIR" \
   --nufft-backend sigpy \
@@ -107,10 +106,14 @@ mpiexec -n "$MPI_RANKS" toporecon reconstruct --algorithm tvme -- \
   --lambda-motion 1e-5 \
   --lambda-echo 1e-5 \
   --l2-coupling \
+  --tol 1e-3 \
   --max-iter 300 \
   --show-progress \
   "$RAW_DATA_DIR" imout
 ```
+
+The standalone `--` marks the end of the wrapper options; everything after it
+is passed to the selected reconstruction algorithm.
 
 `MPI_RANKS=1` is only a shell variable, so the example is equivalent to
 `mpiexec -n 1`. An MPI rank is one reconstruction process; normally, use one
@@ -145,9 +148,11 @@ rank per node, `--multi-gpu` can be omitted.
 | `--motion-groups` | Number of node-grid rows used to divide motion bins. |
 | `--echo-groups` | Number of node-grid columns used to divide echoes. |
 | Lambda options | Regularization strengths; larger values apply stronger regularization. |
-| `tol` | Relative L2-change stopping threshold. The current reconstruction entry points use the fixed value `1e-3`. |
+| `--tol` | Relative L2-change stopping threshold; default `1e-3`. |
 | `--max-iter` | Maximum number of PDHG iterations; default `300`. |
 | `--readout-fraction` | Fraction of readout samples used for reconstruction; default `0.98`. |
+| `--acceleration` | Retrospective undersampling factor for TVM/TVME; default `1` (disabled). |
+| `--crop-to-original` | After an enlarged-FOV reconstruction, crop the output back to the original matrix size. |
 | `MPI_RANKS` / `mpiexec -n` | Total number of MPI processes; normally the total number of allocated GPUs. |
 | `--multi-gpu` | Put different ranks on different local GPUs; required when using multiple ranks per node. |
 | `--l2-coupling` | Couple motion regularization across echoes. |
@@ -169,18 +174,31 @@ the end indices are inclusive.
 After the MPI job finishes, assemble all grid shards into one image:
 
 ```bash
-python scripts/stitch_shards.py "$OUTPUT_DIR"
+toporecon stitch "$OUTPUT_DIR"
 ```
 
-The input shard prefix does not need to be `imout`: by default, the script
+The input shard prefix does not need to be `imout`: by default, the command
 reads `output_stem` from `run_manifest.json`. Use `--input-prefix PREFIX` only
 when overriding that recorded value. The final filename defaults to
 `imout.hdr/.cfl`; choose another name with:
 
 ```bash
-python scripts/stitch_shards.py "$OUTPUT_DIR" --output-name final_image
+toporecon stitch "$OUTPUT_DIR" --output-name final_image
 ```
 
-The script places each shard according to the motion and echo ranges in its
+The command places each shard according to the motion and echo ranges in its
 filename. The same command works for single- and multi-node output, and the
 assembled CFL layout is `[motion, 1, 1, echo, 1, 1, z, y, x]`.
+
+Complete single-node command examples are provided in `examples/run_tvm.sh`,
+`run_tvme.sh`, and `run_tvmw.sh`. `examples/run_postprocessing.sh` provides the
+same post-processing command, while the `deltaai_*.slurm` files are multi-node
+DeltaAI reference templates.
+
+For example, the wrapper accepts the same post-processing options:
+
+```bash
+examples/run_postprocessing.sh "$OUTPUT_DIR" \
+  --input-prefix custom_prefix \
+  --output-name final_image
+```

@@ -40,8 +40,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-markers = [
-    "gpu: requires a CUDA-capable GPU",
-    "mpi: requires an MPI launch environment",
-    "regression: compares against frozen numerical reference results",
-]

@@ -4,17 +4,15 @@
 #SBATCH -n 16
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
-#SBATCH -t 00:03:00
 #SBATCH -J toporecon-tvm-16g-2e2b
 #SBATCH -o %x.%j.log
 #SBATCH -e %x.%j.log
 
 set -euo pipefail
 
-# This job runs a ten-iteration TVM smoke test on four DeltaAI nodes. Increase
-# both MAX_ITER and the sbatch walltime for a complete reconstruction.
-# Every value below can be overridden with:
-#   sbatch --export=ALL,NAME=value examples/deltaai_tvm.slurm
+# TVM reconstruction reference for four DeltaAI nodes. Set a tested
+# walltime with `sbatch --time=HH:MM:SS`; every value below can be overridden
+# through `--export=ALL,NAME=value`.
 
 # === Modules / environment ===
 module reset
@@ -58,8 +56,9 @@ export PYTHONPATH="${TOPORECON_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 # === TVM parameters ===
 NUM_BINS="${NUM_BINS:-6}"
 READOUT_FRACTION="${READOUT_FRACTION:-0.98}"
-LAMBDA_MOTION="${LAMBDA_MOTION:-0.00001}"
-MAX_ITER="${MAX_ITER:-10}"
+LAMBDA_MOTION="${LAMBDA_MOTION:-1e-5}"
+TOL="${TOL:-1e-3}"
+MAX_ITER="${MAX_ITER:-300}"
 ACCELERATION="${ACCELERATION:-1}"
 MOTION_GROUPS="${MOTION_GROUPS:-2}"
 ECHO_GROUPS="${ECHO_GROUPS:-2}"
@@ -109,77 +108,6 @@ fi
 mkdir -p "${OUT_DIR}"
 LOG="${OUT_DIR}/run.${SLURM_JOB_ID}.log"
 
-# === Per-rank GPU and CPU memory watch ===
-WATCH_INTERVAL="${WATCH_INTERVAL:-10}"
-WATCH_DIR="${OUT_DIR}/gpu_watch"
-mkdir -p "${WATCH_DIR}"
-
-WRAP="${OUT_DIR}/gpu_cpu_watch_wrap.${SLURM_JOB_ID}.sh"
-cat > "${WRAP}" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-host=$(hostname)
-local_dir="/tmp/toporecon_watch_${SLURM_JOB_ID}_${SLURM_PROCID}"
-mkdir -p "${local_dir}"
-
-gpu_out="${local_dir}/gpu_${SLURM_JOB_ID}_${host}_p${SLURM_PROCID}_l${SLURM_LOCALID}.csv"
-cpu_out="${local_dir}/cpu_${SLURM_JOB_ID}_${host}_p${SLURM_PROCID}_l${SLURM_LOCALID}.csv"
-
-echo "ts,host,procid,localid,app_pid,gpu_uuid,mem_used_MiB" > "${gpu_out}"
-echo "ts,host,procid,localid,app_pid,rss_kb,vsz_kb,pmem,pcpu,mem_total_kb,mem_avail_kb" > "${cpu_out}"
-
-"$@" &
-app_pid=$!
-
-(
-  while kill -0 "${app_pid}" 2>/dev/null; do
-    ts=$(date +"%F %T")
-    nvidia-smi \
-      --query-compute-apps=pid,gpu_uuid,used_memory \
-      --format=csv,noheader,nounits 2>/dev/null \
-      | awk -F"," -v pid="${app_pid}" -v ts="${ts}" -v host="${host}" \
-          -v p="${SLURM_PROCID}" -v l="${SLURM_LOCALID}" \
-          '{gsub(/ /,""); if($1==pid){print ts","host","p","l","pid","$2","$3}}'
-    sleep "${WATCH_INTERVAL}"
-  done
-) >> "${gpu_out}" &
-gpu_monpid=$!
-
-(
-  while kill -0 "${app_pid}" 2>/dev/null; do
-    ts=$(date +"%F %T")
-    stats=$(ps -p "${app_pid}" -o rss= -o vsz= -o %mem= -o %cpu= 2>/dev/null \
-      | awk '{print $1, $2, $3, $4}' || true)
-    read -r rss_kb vsz_kb pmem pcpu <<< "${stats:-0 0 0 0}"
-    mem_total_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
-    mem_avail_kb=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
-
-    echo "${ts},${host},${SLURM_PROCID},${SLURM_LOCALID},${app_pid},${rss_kb:-0},${vsz_kb:-0},${pmem:-0},${pcpu:-0},${mem_total_kb:-0},${mem_avail_kb:-0}"
-    sleep "${WATCH_INTERVAL}"
-  done
-) >> "${cpu_out}" &
-cpu_monpid=$!
-
-set +e
-wait "${app_pid}"
-rc=$?
-set -e
-
-kill "${gpu_monpid}" 2>/dev/null || true
-kill "${cpu_monpid}" 2>/dev/null || true
-
-mkdir -p "${WATCH_DIR}" 2>/dev/null || true
-cp -f "${gpu_out}" "${WATCH_DIR}/" 2>/dev/null || true
-cp -f "${cpu_out}" "${WATCH_DIR}/" 2>/dev/null || true
-rm -f "${gpu_out}" "${cpu_out}" 2>/dev/null || true
-rmdir "${local_dir}" 2>/dev/null || true
-
-exit "${rc}"
-SH
-chmod +x "${WRAP}"
-export WATCH_INTERVAL WATCH_DIR
-
 # === Job header ===
 {
   echo "=== Job info ==="
@@ -208,13 +136,13 @@ CMD=(
   srun --kill-on-bad-exit=1 --wait=0
   -N 4 -n 16 --ntasks-per-node=4 --gpus-per-node=4
   --chdir="${OUT_DIR}"
-  "${WRAP}"
-  "${PY}" -m toporecon.algorithms.tvm
+  "${PY}" -m toporecon reconstruct --algorithm tvm --
   --multi-gpu
   --nufft-backend sigpy
   --num-bins "${NUM_BINS}"
   --readout-fraction "${READOUT_FRACTION}"
   --lambda-motion "${LAMBDA_MOTION}"
+  --tol "${TOL}"
   --max-iter "${MAX_ITER}"
   --acceleration "${ACCELERATION}"
   --echo-groups "${ECHO_GROUPS}"
