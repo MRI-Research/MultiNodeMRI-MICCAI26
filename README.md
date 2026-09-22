@@ -3,7 +3,7 @@
 This repository contains the reconstruction code and dataset associated with
 the following paper:
 
-> Zhang et al. Large-Scale Distributed GPU-Accelerated Respiratory Motion-Resolved Reconstruction of 3D non-Cartesian mGRE MRI. <em>International Conference on Medical Image Computing and Computer Assisted Interventions (MICCAI) 2026</em>.
+> Zhang et al. Large-Scale Distributed GPU-Accelerated Respiratory Motion-Resolved Reconstruction of 3D non-Cartesian mGRE MRI. <em>International Conference on Medical Image Computing and Computer Assisted Interventions (MICCAI) 2026</em>. [https://papers.miccai.org/miccai-2026/paper/2047_paper.pdf]
 
 Contact: Chao Zhang (<Chao.Zhang.1@stonybrook.edu>)
 
